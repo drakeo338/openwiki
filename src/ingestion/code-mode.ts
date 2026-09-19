@@ -23,6 +23,19 @@ const DEFAULT_CODE_MODE_CRON = "0 8 * * *";
 // Each is created when missing and refreshed in place when already present.
 const CODE_MODE_AGENT_FILES = ["AGENTS.md", "CLAUDE.md"];
 const CLAUDE_AGENTS_IMPORT = "@AGENTS.md";
+// The unmarked section OpenWiki 0.0.x had the agent write into the root agent
+// files, before the managed markers existed. A `## OpenWiki` heading counts as
+// that section only when this sentence comes next, and only lines of the old
+// template are removed, so anything a user wrote around it stays.
+const LEGACY_OPENWIKI_FIRST_LINE =
+  "This repository has documentation located in the /openwiki directory.";
+const LEGACY_OPENWIKI_LINES = new Set([
+  LEGACY_OPENWIKI_FIRST_LINE,
+  "Start here:",
+  "- [OpenWiki quickstart](openwiki/quickstart.md)",
+  "OpenWiki includes repository overview, architecture notes, workflows, domain concepts, operations, integrations, testing guidance, and source maps.",
+  "When working in this repository, read the OpenWiki quickstart first, then follow its links to the relevant architecture, workflow, domain, operation, and testing notes.",
+]);
 
 /** Controls which parts of the repo OpenWiki sets up for code mode. */
 export interface CodeModeRepoSetupOptions {
@@ -238,29 +251,42 @@ async function prepareCodeModeAgentSnippet(
     }
   }
 
-  const startIndex = currentContent.indexOf(OPENWIKI_AGENTS_SNIPPET_START);
-  const endIndex = currentContent.indexOf(OPENWIKI_AGENTS_SNIPPET_END);
-  const hasNoMarkers = startIndex === -1 && endIndex === -1;
+  const { content, legacyIndex } = removeLegacyOpenWikiSections(currentContent);
 
+  // A CLAUDE.md that only imports AGENTS.md already gets the block from there.
   if (
     path.basename(agentsPath) === "CLAUDE.md" &&
-    currentContent.trim() === CLAUDE_AGENTS_IMPORT
+    content.trim() === CLAUDE_AGENTS_IMPORT
   ) {
-    return { agentsPath, nextContent: undefined };
-  }
-
-  if (hasNoMarkers) {
     return {
       agentsPath,
-      nextContent: `${currentContent.trimEnd()}${currentContent.trim().length > 0 ? "\n\n" : ""}${snippet}\n`,
+      nextContent: legacyIndex === undefined ? undefined : content,
+    };
+  }
+
+  const startIndex = content.indexOf(OPENWIKI_AGENTS_SNIPPET_START);
+  const endIndex = content.indexOf(OPENWIKI_AGENTS_SNIPPET_END);
+  const hasNoMarkers = startIndex === -1 && endIndex === -1;
+
+  if (hasNoMarkers) {
+    // The managed block takes the place of a legacy section, if there was one.
+    const before =
+      legacyIndex === undefined ? content : content.slice(0, legacyIndex);
+    const after = legacyIndex === undefined ? "" : content.slice(legacyIndex);
+    return {
+      agentsPath,
+      nextContent:
+        after.length > 0
+          ? `${before}${snippet}\n\n${after}`
+          : `${before.trimEnd()}${before.trim().length > 0 ? "\n\n" : ""}${snippet}\n`,
     };
   }
 
   const hasOneOrderedPair =
     startIndex !== -1 &&
     endIndex > startIndex &&
-    startIndex === currentContent.lastIndexOf(OPENWIKI_AGENTS_SNIPPET_START) &&
-    endIndex === currentContent.lastIndexOf(OPENWIKI_AGENTS_SNIPPET_END);
+    startIndex === content.lastIndexOf(OPENWIKI_AGENTS_SNIPPET_START) &&
+    endIndex === content.lastIndexOf(OPENWIKI_AGENTS_SNIPPET_END);
 
   if (!hasOneOrderedPair) {
     throw new Error(
@@ -270,8 +296,69 @@ async function prepareCodeModeAgentSnippet(
 
   return {
     agentsPath,
-    nextContent: `${currentContent.slice(0, startIndex)}${snippet}${currentContent.slice(endIndex + OPENWIKI_AGENTS_SNIPPET_END.length)}`,
+    nextContent: `${content.slice(0, startIndex)}${snippet}${content.slice(endIndex + OPENWIKI_AGENTS_SNIPPET_END.length)}`,
   };
+}
+
+/**
+ * Removes the unmarked `## OpenWiki` sections older versions wrote, and
+ * reports where the first one began so the managed block can take its place.
+ * A section ends at the first line that is not part of the old template, and
+ * headings inside fenced code blocks are skipped.
+ */
+function removeLegacyOpenWikiSections(currentContent: string): {
+  content: string;
+  legacyIndex: number | undefined;
+} {
+  const lines = currentContent.split(/(?<=\n)/u);
+  let content = "";
+  let legacyIndex: number | undefined;
+  let endsWithLegacy = false;
+  let fence: string | undefined;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    const fenceMarker = /^ {0,3}(`{3,}|~{3,})/u.exec(line)?.[1];
+
+    if (fenceMarker !== undefined) {
+      if (fence === undefined) {
+        fence = fenceMarker;
+      } else if (
+        fenceMarker[0] === fence[0] &&
+        fenceMarker.length >= fence.length
+      ) {
+        fence = undefined;
+      }
+    } else if (fence === undefined && line.trimEnd() === "## OpenWiki") {
+      let end = index + 1;
+      while (end < lines.length && lines[end]?.trim() === "") {
+        end += 1;
+      }
+      if (lines[end]?.trimEnd() === LEGACY_OPENWIKI_FIRST_LINE) {
+        while (
+          end < lines.length &&
+          (lines[end]?.trim() === "" ||
+            LEGACY_OPENWIKI_LINES.has(lines[end]?.trimEnd() ?? ""))
+        ) {
+          end += 1;
+        }
+        legacyIndex ??= content.length;
+        endsWithLegacy = end === lines.length;
+        index = end - 1;
+        continue;
+      }
+    }
+
+    content += line;
+  }
+
+  // A section at the end of the file takes its leading blank lines with it,
+  // so the file still ends in a single newline.
+  if (endsWithLegacy) {
+    content = content.trim().length > 0 ? `${content.trimEnd()}\n` : "";
+  }
+
+  return { content, legacyIndex };
 }
 
 /**

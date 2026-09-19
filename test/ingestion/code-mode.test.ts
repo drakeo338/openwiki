@@ -18,6 +18,24 @@ import type { OpenWikiRunEvent } from "../../src/agent/types.ts";
 
 const SNIPPET_START = "<!-- OPENWIKI:START -->";
 const SNIPPET_END = "<!-- OPENWIKI:END -->";
+// The unmarked section OpenWiki 0.0.x wrote into agent files before the
+// managed markers existed.
+const LEGACY_OPENWIKI_SECTION = `## OpenWiki
+
+This repository has documentation located in the /openwiki directory.
+
+Start here:
+- [OpenWiki quickstart](openwiki/quickstart.md)
+
+OpenWiki includes repository overview, architecture notes, workflows, domain concepts, operations, integrations, testing guidance, and source maps.
+
+When working in this repository, read the OpenWiki quickstart first, then follow its links to the relevant architecture, workflow, domain, operation, and testing notes.
+`;
+const LEGACY_SENTENCE = "located in the /openwiki directory";
+
+function countOpenWikiHeadings(content: string): number {
+  return content.match(/^## OpenWiki\r?$/gmu)?.length ?? 0;
+}
 
 const tempRepos: string[] = [];
 
@@ -226,6 +244,192 @@ Trailing notes that must survive.
     expect(content?.indexOf("Do not lose this line.")).toBeLessThan(
       content?.indexOf(SNIPPET_START) ?? -1,
     );
+  });
+
+  test("replaces a legacy unmarked OpenWiki section in place instead of appending a duplicate", async () => {
+    const repo = await createTempRepo();
+    const agentsPath = path.join(repo, "AGENTS.md");
+    await writeFile(
+      agentsPath,
+      `# My Project
+
+${LEGACY_OPENWIKI_SECTION}
+## Deployment
+
+Keep this section intact.
+`,
+      "utf8",
+    );
+
+    await ensureCodeModeRepoSetup(repo);
+
+    const content = (await readIfPresent(agentsPath)) ?? "";
+    expect(countOpenWikiHeadings(content)).toBe(1);
+    expect(content).not.toContain(LEGACY_SENTENCE);
+    expect(content).toContain("# My Project");
+    expect(content).toContain("## Deployment\n\nKeep this section intact.\n");
+    // The managed block takes the legacy section's place.
+    expect(content.indexOf(SNIPPET_END)).toBeLessThan(
+      content.indexOf("## Deployment"),
+    );
+
+    await ensureCodeModeRepoSetup(repo);
+    expect(await readIfPresent(agentsPath)).toBe(content);
+  });
+
+  for (const [name, userContent] of [
+    [
+      "a following subsection",
+      "### Our conventions\n\nRun the linter before committing.\n",
+    ],
+    [
+      "a plain paragraph right after it",
+      "Our own note about the wiki, kept by hand.\n",
+    ],
+    ["a setext heading", "Deployment\n----------\n\nShip on Fridays.\n"],
+    [
+      "a foreign comment marker",
+      "<!-- nx configuration start-->\nNx guidance.\n<!-- nx configuration end-->\n",
+    ],
+  ] as const) {
+    test(`keeps ${name} when replacing a legacy OpenWiki section`, async () => {
+      const repo = await createTempRepo();
+      const agentsPath = path.join(repo, "AGENTS.md");
+      await writeFile(
+        agentsPath,
+        `# My Project\n\n${LEGACY_OPENWIKI_SECTION}\n${userContent}`,
+        "utf8",
+      );
+
+      await ensureCodeModeRepoSetup(repo);
+
+      const content = (await readIfPresent(agentsPath)) ?? "";
+      expect(content).toContain(userContent);
+      expect(countOpenWikiHeadings(content)).toBe(1);
+      expect(content).not.toContain(LEGACY_SENTENCE);
+    });
+  }
+
+  test("replaces a legacy OpenWiki section at the end of the file", async () => {
+    const repo = await createTempRepo();
+    const agentsPath = path.join(repo, "AGENTS.md");
+    await writeFile(
+      agentsPath,
+      `# My Project\n\nDo not lose this line.\n\n${LEGACY_OPENWIKI_SECTION}`,
+      "utf8",
+    );
+
+    await ensureCodeModeRepoSetup(repo);
+
+    const content = (await readIfPresent(agentsPath)) ?? "";
+    expect(content).toContain("# My Project\n\nDo not lose this line.\n\n");
+    expect(countOpenWikiHeadings(content)).toBe(1);
+    expect(content).not.toContain(LEGACY_SENTENCE);
+    expect(content.endsWith(`${SNIPPET_END}\n`)).toBe(true);
+  });
+
+  test("replaces a legacy OpenWiki section in a file with CRLF line endings", async () => {
+    const repo = await createTempRepo();
+    const agentsPath = path.join(repo, "AGENTS.md");
+    await writeFile(
+      agentsPath,
+      `# My Project\n\n${LEGACY_OPENWIKI_SECTION}\nKeep this line.\n`.replace(
+        /\n/gu,
+        "\r\n",
+      ),
+      "utf8",
+    );
+
+    await ensureCodeModeRepoSetup(repo);
+
+    const content = (await readIfPresent(agentsPath)) ?? "";
+    expect(content).toContain("# My Project\r\n");
+    expect(content).toContain("Keep this line.\r\n");
+    expect(countOpenWikiHeadings(content)).toBe(1);
+    expect(content).not.toContain(LEGACY_SENTENCE);
+  });
+
+  test("removes every legacy OpenWiki section, keeping the content between them", async () => {
+    const repo = await createTempRepo();
+    const agentsPath = path.join(repo, "AGENTS.md");
+    await writeFile(
+      agentsPath,
+      `${LEGACY_OPENWIKI_SECTION}\nMiddle notes.\n\n${LEGACY_OPENWIKI_SECTION}\nEnd notes.\n`,
+      "utf8",
+    );
+
+    await ensureCodeModeRepoSetup(repo);
+
+    const content = (await readIfPresent(agentsPath)) ?? "";
+    expect(content).toContain("Middle notes.\n");
+    expect(content).toContain("End notes.\n");
+    expect(countOpenWikiHeadings(content)).toBe(1);
+    expect(content).not.toContain(LEGACY_SENTENCE);
+  });
+
+  test("leaves a legacy OpenWiki section quoted in a code fence alone", async () => {
+    const repo = await createTempRepo();
+    const agentsPath = path.join(repo, "AGENTS.md");
+    const existing = `# My Project\n\nOld versions wrote:\n\n\`\`\`markdown\n${LEGACY_OPENWIKI_SECTION}\`\`\`\n\nKeep this line.\n`;
+    await writeFile(agentsPath, existing, "utf8");
+
+    await ensureCodeModeRepoSetup(repo);
+
+    const content = (await readIfPresent(agentsPath)) ?? "";
+    expect(content.startsWith(existing)).toBe(true);
+    expect(content).toContain(SNIPPET_START);
+  });
+
+  test("removes a legacy unmarked OpenWiki section left beside a managed block", async () => {
+    const repo = await createTempRepo();
+    const claudePath = path.join(repo, "CLAUDE.md");
+    await writeFile(
+      claudePath,
+      `${LEGACY_OPENWIKI_SECTION}\n${SNIPPET_START}
+stale OpenWiki content
+${SNIPPET_END}
+`,
+      "utf8",
+    );
+
+    await ensureCodeModeRepoSetup(repo);
+
+    const content = (await readIfPresent(claudePath)) ?? "";
+    expect(countOpenWikiHeadings(content)).toBe(1);
+    expect(content).not.toContain(LEGACY_SENTENCE);
+    expect(content).not.toContain("stale OpenWiki content");
+    expect(content.startsWith(SNIPPET_START)).toBe(true);
+  });
+
+  test("removes a legacy OpenWiki section from a CLAUDE.md that imports AGENTS.md", async () => {
+    const repo = await createTempRepo();
+    const claudePath = path.join(repo, "CLAUDE.md");
+    await writeFile(
+      claudePath,
+      `${LEGACY_OPENWIKI_SECTION}\n@AGENTS.md\n`,
+      "utf8",
+    );
+
+    await ensureCodeModeRepoSetup(repo);
+
+    // AGENTS.md carries the managed block, so the import is all that is left.
+    expect(await readIfPresent(claudePath)).toBe("@AGENTS.md\n");
+  });
+
+  test("leaves a user-written OpenWiki section without the legacy text alone", async () => {
+    const repo = await createTempRepo();
+    const agentsPath = path.join(repo, "AGENTS.md");
+    const userSection = `## OpenWiki
+
+We vendor OpenWiki under tools/; see tools/openwiki/README.md.
+`;
+    await writeFile(agentsPath, userSection, "utf8");
+
+    await ensureCodeModeRepoSetup(repo);
+
+    const content = (await readIfPresent(agentsPath)) ?? "";
+    expect(content.startsWith(userSection)).toBe(true);
+    expect(content).toContain(SNIPPET_START);
   });
 
   test("is idempotent across repeated runs", async () => {
